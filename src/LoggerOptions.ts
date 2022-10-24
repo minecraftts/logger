@@ -7,6 +7,7 @@ type LoggerOptions = {
     logDir?: string;
     logFile?: string;
     dumpTime?: number;
+    exitEvents?: string[];
 };
 
 export default LoggerOptions;

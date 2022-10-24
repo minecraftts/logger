@@ -21,6 +21,7 @@ export default class Logger {
     private color: boolean = true;
     private queueDumpTime?: number = 1000;
     private writeReady = false;
+    private exitEvents?: string[] = ["exit", "SIGINT", "SIGTERM", "SIGUSR1", "SIGUSR2", "uncaughtException"];
 
     constructor(options: LoggerOptions = {}) {
         Logger.instance = this;
@@ -50,6 +51,10 @@ export default class Logger {
 
         if ("dumpTime" in options) {
             this.queueDumpTime = options.dumpTime;
+        }
+
+        if ("exitEvents" in options) {
+            this.exitEvents = options.exitEvents;
         }
 
         if (this.logDir && this.logFilename) {
@@ -88,9 +93,11 @@ export default class Logger {
         console.warn = this.warn.bind(this);
         console.error = this.error.bind(this);
 
-        ["exit", "SIGINT", "SIGTERM", "SIGUSR1", "SIGUSR2", "uncaughtException"].forEach((eventType) => {
-            process.on(eventType, this.exitHandler.bind(this, eventType));
-        })
+        if (this.exitEvents) {
+            this.exitEvents.forEach((eventType) => {
+                process.on(eventType, this.exitHandler.bind(this, eventType));
+            })
+        }
     }
 
     public static raw(...args: any[]): void {
@@ -303,12 +310,11 @@ export default class Logger {
             let destinationFile = path.join(logDir, destinationName);
             let iteration = 0;
 
-            if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
-            if (isMainThread && !fs.existsSync(logFile)) fs.writeFileSync(logFile, "");
-
             if(Logger.queues[logFile]) {
+                if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+                if (isMainThread && !fs.existsSync(logFile)) fs.writeFileSync(logFile, "");
+
                 fs.appendFileSync(logFile, Logger.queues[logFile].dump().join(""));
-                delete Logger.queues[logFile];
 
                 if (fs.existsSync(destinationFile + ".log")) {
                     while (fs.existsSync(destinationFile + ".log")) {
@@ -319,6 +325,7 @@ export default class Logger {
                 }
 
                 fs.copyFileSync(logFile, destinationFile + ".log");
+                delete Logger.queues[logFile];
             }
         }
 
