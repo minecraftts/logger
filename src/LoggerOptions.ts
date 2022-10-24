@@ -6,6 +6,7 @@ type LoggerOptions = {
     color?: boolean;
     logDir?: string;
     logFile?: string;
+    dumpTime?: number;
 };
 
 export default LoggerOptions;
