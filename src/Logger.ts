@@ -3,12 +3,14 @@ import path from "path";
 import stripAnsi from "strip-ansi";
 import LoggerOptions from "./LoggerOptions";
 import LogLevel from "./LogLevel";
+import LogQueue from "./LogQueue"
 import util from "util";
 import fs from "fs";
 import { isMainThread, threadId } from "worker_threads";
 
 export default class Logger {
     private static instance: Logger;
+    private static queues: { [index: string]: LogQueue } = {};
 
     private stdout: NodeJS.WriteStream;
     private stderr: NodeJS.WriteStream;
@@ -17,9 +19,8 @@ export default class Logger {
     private logFilename?: string = "latest.txt";
     private defaultLevel: LogLevel = LogLevel.INFO;
     private color: boolean = true;
-    private queueReady: boolean = false;
-    private queue: string[] = [];
     private queueDumpTime?: number = 1000;
+    private writeReady = false;
 
     constructor(options: LoggerOptions = {}) {
         Logger.instance = this;
@@ -53,15 +54,20 @@ export default class Logger {
 
         if (this.logDir && this.logFilename) {
             const logDir = path.join(process.cwd(), this.logDir);
+            const logPath = path.join(logDir, this.logFilename);
+            Logger.queues[logPath] = new LogQueue();
 
             fs.access(logDir, (err) => {
                 let writeBaseFile = () => {
-                    if (isMainThread && this.logFilename) {
-                        fs.writeFile(path.join(logDir, this.logFilename), "", (err) => {
-                            this.queueReady = true;
-                        })
-                    } else {
-                        this.queueReady = true;
+                    if (this.logFilename) {
+                        let logPath = path.join(logDir, this.logFilename);
+                        if (isMainThread) {
+                            fs.writeFile(logPath, "", (err) => {
+                                this.writeReady = true;
+                            })
+                        } else {
+                            this.writeReady = true;
+                        }
                     }
                 }
                 if (err) {
@@ -81,6 +87,10 @@ export default class Logger {
         console.info = this.info.bind(this);
         console.warn = this.warn.bind(this);
         console.error = this.error.bind(this);
+
+        ["exit", "SIGINT", "SIGTERM", "SIGUSR1", "SIGUSR2", "uncaughtException"].forEach((eventType) => {
+            process.on(eventType, this.exitHandler.bind(this, eventType));
+        })
     }
 
     public static raw(...args: any[]): void {
@@ -260,16 +270,20 @@ export default class Logger {
 
     private addQueueItem(queueItem: string): void {
         if (this.logDir && this.logFilename) {
-            this.queue.push(stripAnsi(queueItem));
+            let logPath = path.join(process.cwd(), this.logDir, this.logFilename);
+            if (Logger.queues[logPath]) {
+                Logger.queues[logPath].push(stripAnsi(queueItem));
+            }
         }
     }
 
     private dumpQueue() {
-        if (this.logDir && this.logFilename && this.queueReady) {
-            this.queueReady = false;
-            const queueSet: string[] = this.queue.splice(0, this.queue.length);
-            fs.appendFile(path.join(process.cwd(), this.logDir, this.logFilename), queueSet.join(""), (err) => {
-                this.queueReady = true;
+        if (this.logDir && this.logFilename && this.writeReady) {
+            this.writeReady = false;
+            let logPath = path.join(process.cwd(), this.logDir, this.logFilename);
+            let queue = Logger.queues[logPath].dump();
+            fs.appendFile(path.join(process.cwd(), this.logDir, this.logFilename), queue.join(""), (err) => {
+                this.writeReady = true;
             })
         }
     }
@@ -290,23 +304,31 @@ export default class Logger {
             let iteration = 0;
 
             if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
-            if (isMainThread) fs.writeFileSync(path.join(logDir, this.logFilename), "");
+            if (isMainThread && !fs.existsSync(logFile)) fs.writeFileSync(logFile, "");
 
-            fs.appendFileSync(logFile, this.queue.join(""));
+            if(Logger.queues[logFile]) {
+                fs.appendFileSync(logFile, Logger.queues[logFile].dump().join(""));
+                delete Logger.queues[logFile];
 
-            if (fs.existsSync(destinationFile + ".log")) {
-                while (fs.existsSync(destinationFile + ".log")) {
-                    iteration++;
-                    destinationName = `${destinationBase}-${iteration}`;
-                    destinationFile = path.join(logDir, destinationName);
+                if (fs.existsSync(destinationFile + ".log")) {
+                    while (fs.existsSync(destinationFile + ".log")) {
+                        iteration++;
+                        destinationName = `${destinationBase}-${iteration}`;
+                        destinationFile = path.join(logDir, destinationName);
+                    }
                 }
+
+                fs.copyFileSync(logFile, destinationFile + ".log");
             }
-            
-            fs.copyFileSync(logFile, destinationFile + ".log");
         }
 
         this.stdout.end();
         this.stderr.end();
+    }
+
+    private exitHandler(error?: Error | string): void {
+        this.cleanup(error);
+        process.exit();
     }
 
     public static getInstance(): Logger {
