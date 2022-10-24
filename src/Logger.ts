@@ -17,6 +17,9 @@ export default class Logger {
     private logFilename?: string = "latest.txt";
     private defaultLevel: LogLevel = LogLevel.INFO;
     private color: boolean = true;
+    private queueReady: boolean = false;
+    private queue: string[] = [];
+    private queueDumpTime?: number = 1000;
 
     constructor(options: LoggerOptions = {}) {
         Logger.instance = this;
@@ -44,12 +47,34 @@ export default class Logger {
             this.logFilename = options.logFile;
         }
 
+        if ("dumpTime" in options) {
+            this.queueDumpTime = options.dumpTime;
+        }
+
         if (this.logDir && this.logFilename) {
             const logDir = path.join(process.cwd(), this.logDir);
 
-            if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
-            if (isMainThread) fs.writeFileSync(path.join(logDir, this.logFilename), "");
+            fs.access(logDir, (err) => {
+                let writeBaseFile = () => {
+                    if (isMainThread && this.logFilename) {
+                        fs.writeFile(path.join(logDir, this.logFilename), "", (err) => {
+                            this.queueReady = true;
+                        })
+                    } else {
+                        this.queueReady = true;
+                    }
+                }
+                if (err) {
+                    fs.mkdir(logDir, { recursive: true }, (err) => {
+                        writeBaseFile();
+                    })
+                } else {
+                    writeBaseFile();
+                }
+            });
         }
+
+        setInterval(this.dumpQueue.bind(this), this.queueDumpTime);
 
         console.log = this.log.bind(this);
         console.debug = this.debug.bind(this);
@@ -119,9 +144,7 @@ export default class Logger {
 
         this.stdout.write(formatted);
 
-        if (this.logDir && this.logFilename) {
-            fs.appendFileSync(path.join(process.cwd(), this.logDir, this.logFilename), stripAnsi(formatted));
-        }
+        this.addQueueItem(formatted);
     }
 
     public log(...args: any): void {
@@ -176,10 +199,7 @@ export default class Logger {
             this.stdout.write(formattedMessage);
         }
 
-        if (this.logDir && this.logFilename) {
-            fs.appendFileSync(path.join(process.cwd(), `${this.logDir}/${this.logFilename}`),
-                stripAnsi(formattedMessage));
-        }
+        this.addQueueItem(formattedMessage);
     }
 
     private getLevelString(level: LogLevel): string {
@@ -238,6 +258,22 @@ export default class Logger {
         return formattedArgs.join(" ");
     }
 
+    private addQueueItem(queueItem: string): void {
+        if (this.logDir && this.logFilename) {
+            this.queue.push(stripAnsi(queueItem));
+        }
+    }
+
+    private dumpQueue() {
+        if (this.logDir && this.logFilename && this.queueReady) {
+            this.queueReady = false;
+            const queueSet: string[] = this.queue.splice(0, this.queue.length);
+            fs.appendFile(path.join(process.cwd(), this.logDir, this.logFilename), queueSet.join(""), (err) => {
+                this.queueReady = true;
+            })
+        }
+    }
+
     public cleanup(error?: Error | string): void {
         if (error) {
             this.critical(error);
@@ -252,6 +288,11 @@ export default class Logger {
             let destinationName = `${destinationBase}-0`;
             let destinationFile = path.join(logDir, destinationName);
             let iteration = 0;
+
+            if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+            if (isMainThread) fs.writeFileSync(path.join(logDir, this.logFilename), "");
+
+            fs.appendFileSync(logFile, this.queue.join(""));
 
             if (fs.existsSync(destinationFile + ".log")) {
                 while (fs.existsSync(destinationFile + ".log")) {
